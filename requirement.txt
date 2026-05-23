@@ -1,0 +1,12 @@
+PyQt5==5.15.11
+matplotlib==3.10.9
+Pillow==12.1.1
+numpy==2.2.6
+librosa
+soundfile
+faster-whisper
+SpeechRecognition
+torch
+torchvision
+transformers
+llama-cpp-python
