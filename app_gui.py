@@ -260,8 +260,15 @@ class FileAnalysisWorker(QThread):
             ai_prob, ai_label = None, None
             if final_score >= 2.0:
                 self.log_signal.emit("\n  🔍 AI 생성 음성 종합 판정 중...\n")
-                ai_prob, ai_label = voice.finalize_ai_verdict()
-                self.log_signal.emit(f"  결과: {ai_label}  ({ai_prob*100:.1f}%)\n")
+                temp_prob, temp_label = voice.finalize_ai_verdict()
+                
+                if temp_prob >= 0.6:
+                    ai_prob, ai_label = temp_prob, temp_label
+                    self.log_signal.emit(f"  결과: AI일 확률 ({ai_prob*100:.1f}%)\n")
+                else:
+                    ai_prob = temp_prob
+                    ai_label = "정상 음성"
+                    self.log_signal.emit("  결과: 정상 음성\n")
 
             report = generate_report(" ".join(full_texts), final_score, detail_str, ai_prob=ai_prob, ai_label=ai_label)
             self.done_signal.emit(final_score, report)
@@ -305,7 +312,7 @@ class FileAnalysisTab(QWidget):
         self._btn_run.clicked.connect(self._run_analysis)
         self._btn_run.setEnabled(False)
 
-        # 💡 중단 버튼 추가
+        # 중단 버튼
         self._btn_stop = make_btn("⏹  분석 중단", "#da3633", "#f85149")
         self._btn_stop.clicked.connect(self._stop_analysis)
         self._btn_stop.setEnabled(False)
@@ -340,7 +347,7 @@ class FileAnalysisTab(QWidget):
         if not self._audio_path: return
         self._log.clear()
         self._btn_run.setEnabled(False)
-        self._btn_stop.setEnabled(True)  # 실행 시 중단 버튼 활성화
+        self._btn_stop.setEnabled(True)  
         self._progress.setVisible(True)
 
         self._worker = FileAnalysisWorker(self._audio_path)
@@ -357,19 +364,23 @@ class FileAnalysisTab(QWidget):
         self._btn_stop.setEnabled(False)
         append_colored(self._log, "\n⏳ 분석 중단 요청됨... (현재 진행 중인 작업 완료 직후 안전하게 정지합니다)\n")
 
+    # ── 💡 정상 판정 출력 버그 수정 구간 ──────────────────────────
     def _on_done(self, score: float, report: str):
-        if not report:  # 완전 극초기에 중단되어 출력할 내용이 없는 경우
+        # 사용자가 분석 실행 후 극초기(오디오 로드 등 루프 시작 전)에 중단 버튼을 누른 경우에만 출력 없이 종료
+        if self._worker and self._worker._stop_flag and not report and score == 0.0:
             return
 
         append_colored(self._log, f"\n\n{'═'*55}\n")
         append_colored(self._log, f"  📊 최종 누적 위험도: {score:.2f}/5.00\n")
         append_colored(self._log, f"{'═'*55}\n\n")
         
-        if report and "일상 단계" not in report:
+        # 60% 이상 판정된 AI 음성 확률 정보나 피싱 리포트 요약 내용이 존재하는 경우
+        if report:
             append_colored(self._log, report + "\n")
             ask_save_report(self, report, "File")
+        # 분석 결과 점수가 안전 등급인 경우 정상 판정 메시지를 확실하게 출력
         else:
-            append_colored(self._log, "✅ 위험 점수가 2.0 미만이므로 보이스피싱 위험이 낮은 일반 대화로 분류되었습니다. (상세 리포트 생략)\n")
+            append_colored(self._log, "✅ 분석 결과: 보이스피싱 위험 점수가 2.0 미만인 정상 대화(보이스피싱 위험성 낮음)로 최종 판정되었습니다. (상세 리포트 생략)\n")
 
     def _on_finished(self):
         self._btn_run.setEnabled(True)
@@ -803,18 +814,24 @@ class BatchWorker(QThread):
         self.target_dir   = target_dir
         self.actual_class = actual_class
         self._old_stdout  = None
+        self._stop_flag   = False
+
+    def stop(self):
+        self._stop_flag = True
 
     def run(self):
         self._old_stdout = sys.stdout
         sys.stdout = StreamRedirector(self.log_signal)
         try:
             import csv, soundfile as sf, librosa
+            import numpy as np
             from config import SAMPLE_RATE, MIN_CHUNK_SAMPLES, DECAY_RATE_FILE
             from whisper_stt import run_stt_with_timestamps
             from risk_calculator import RiskAccumulator, calculate_multimodal_risk
             from keyword_score import keyword_score
             from voice_analyzer import VoiceAnalyzer
             from model_kluebert import detect_batch
+            from datetime import datetime
 
             PHISHING_THRESHOLD, OUTPUT_DIR = 3.5, "./experiment_results"
             os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -827,10 +844,17 @@ class BatchWorker(QThread):
                         if "파일명" in row: completed.add(row["파일명"])
 
             audio_files = [f for f in os.listdir(self.target_dir) if f.lower().endswith(('.mp3', '.wav', '.m4a', '.mp4', '.pcm'))]
+            total_files = len(audio_files)
             intervals = ["~20s", "20s~40s", "40s~60s", "1m~1m20s", "1m20s~"]
-            stats = {inv: [0, 0] for inv in intervals}
+            stats = {inv: {"total": 0, "correct": 0} for inv in intervals}
 
-            self.log_signal.emit(f"🚀 [{self.actual_class}] 배치 파일 다중 실험 시작\n")
+            # Arousal 수치를 직관적인 텍스트 상태로 변환하는 함수
+            def get_arousal_label(value):
+                if value >= 0.65: return "흥분/압박"
+                elif value <= 0.40: return "차분/침착"
+                else: return "평온/중립"
+
+            self.log_signal.emit(f"🚀 [{self.actual_class}] 배치 파일 다중 실험 시작 (총 {total_files}개 파일)\n")
             voice = VoiceAnalyzer()
 
             with open(csv_path, "a", encoding="utf-8-sig", newline="") as f:
@@ -839,8 +863,17 @@ class BatchWorker(QThread):
                 if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0: writer.writeheader()
 
                 for idx, filename in enumerate(audio_files):
-                    self.progress_signal.emit(idx + 1, len(audio_files))
-                    if filename in completed: continue
+                    current_idx = idx + 1
+                    
+                    if self._stop_flag:
+                        self.log_signal.emit("\n⚠️ 사용자의 요청으로 배치 실험이 중간에 정지되었습니다. (현재까지의 데이터로 리포트를 산출합니다)\n")
+                        break
+
+                    self.progress_signal.emit(current_idx, total_files)
+                    
+                    if filename in completed:
+                        self.log_signal.emit(f"⏩ [{current_idx}/{total_files}] {filename} (이미 분석 완료됨)\n")
+                        continue
 
                     audio_path = os.path.join(self.target_dir, filename)
                     temp_wav = None
@@ -869,7 +902,9 @@ class BatchWorker(QThread):
                         accumulator = RiskAccumulator(decay_rate=DECAY_RATE_FILE)
                         voice.is_calibrated = False
                         voice._calib.clear(); voice._hist.clear(); voice._buf.clear()
-                        has_attitude_shift = False
+                        
+                        # 파일 전체 가청 구간의 감정 지표 추적용 배열
+                        file_arousals = []
 
                         for start, end, text in segments:
                             si = int(start * SAMPLE_RATE)
@@ -885,42 +920,113 @@ class BatchWorker(QThread):
                                 else:
                                     cur_a, base_a = voice.get_arousal_state(chunk)
                                     voice_available = True
+                                    file_arousals.append(cur_a) # 실시간 Arousal 지표 축적
                                     if k_score > 0 or label == "보이스피싱":
                                         voice.accumulate_ai_prob(chunk, risk_weight=accumulator.cumulative_score)
 
                             risk, _ = calculate_multimodal_risk(label=label, confidence=conf, k_score=k_score, has_combined_risk=combo, current_arousal=cur_a, baseline_arousal=base_a, voice_available=voice_available, verbose=False)
                             accumulator.update(risk, label, current_arousal=cur_a if voice_available else None)
 
+                        # ── 💡 [핵심 구현] 임계값 0.25 기반 양방향 감정 격변 매핑 알고리즘 ──
+                        has_attitude_shift = False
+                        shift_message = "변화 없음"
+                        clean_smsg = shift_message
+
+                        if len(file_arousals) >= 2:
+                            # 통화 초반 3문장 평균을 기준으로 설정
+                            start_a = float(np.mean(file_arousals[:3])) if len(file_arousals) >= 3 else file_arousals[0]
+                            max_a = max(file_arousals)
+                            min_a = min(file_arousals)
+                            
+                            delta_up = max_a - start_a     # 격앙/압박 방향 변화량
+                            delta_down = start_a - min_a   # 차분/회유 방향 변화량
+                            
+                            # 요구사항에 맞춰 임계값을 0.25로 변경하고 양방향 탐지 활성화
+                            if delta_up >= 0.25 or delta_down >= 0.25:
+                                has_attitude_shift = True
+                                # 상승 변화가 더 지배적일 때 (격앙)
+                                if delta_up >= delta_down:
+                                    clean_smsg = f"[{get_arousal_label(start_a)}] ➔ [{get_arousal_label(max_a)}] 상태로 감정 상승 (Δ+{delta_up:.2f})"
+                                    shift_message = f"⚡[태도변화감지]\n     └ 감정 흐름: {clean_smsg}"
+                                # 하락 변화가 더 지배적일 때 (회유/차분)
+                                else:
+                                    clean_smsg = f"[{get_arousal_label(start_a)}] ➔ [{get_arousal_label(min_a)}] 상태로 급격히 다운 (Δ-{delta_down:.2f})"
+                                    shift_message = f"⚡[태도변화감지]\n     └ 감정 흐름: {clean_smsg}"
+
                         final_score = accumulator.cumulative_score
                         ai_prob = 0.0
-                        if final_score >= 2.0 and voice._buf: ai_prob, _ = voice.finalize_ai_verdict()
+                        if final_score >= 2.0 and voice._buf: 
+                            ai_prob, _ = voice.finalize_ai_verdict()
 
                         is_phishing = final_score >= PHISHING_THRESHOLD
                         final_verdict = "보이스피싱" if is_phishing else "정상"
                         is_correct = ((is_phishing and self.actual_class == "보이스피싱") or (not is_phishing and self.actual_class == "정상대화"))
 
                         if interval in stats:
-                            stats[interval][0] += 1
-                            if is_correct: stats[interval][1] += 1
+                            stats[interval]["total"] += 1
+                            if is_correct: stats[interval]["correct"] += 1
 
+                        # CSV 쓰기 작업
                         writer.writerow({
                             "파일명": filename, "실제구분": self.actual_class, "음성길이(초)": round(duration, 1), "길이구간": interval,
-                            "최종위험점수": round(final_score, 2), "AI음성확률": f"{ai_prob*100:.1f}%" if ai_prob > 0 else "N/A",
-                            "태도변화여부": "Y" if has_attitude_shift else "N", "감정변화상세(Arousal)": "정적 분석 완료", "최종판정": final_verdict
+                            "최종위험점수": round(final_score, 2), 
+                            "AI음성확률": f"{ai_prob*100:.1f}%" if ai_prob >= 0.6 else "정상 음성",
+                            "태도변화여부": "Y" if has_attitude_shift else "N", "감정변화상세(Arousal)": clean_smsg,
+                            "최종판정": final_verdict
                         })
-                        f.flush()
-                        self.log_signal.emit(f"📊 {filename} 완료 -> 점수: {final_score:.2f} | 판정: [{final_verdict}]\n")
-                    except Exception as e: self.log_signal.emit(f"❌ {filename} 실패: {e}\n")
+                        f.flush() 
+
+                        # 실시간 결과 터미널 스타일 로그 렌더링
+                        ai_str = f"{ai_prob*100:.1f}%" if ai_prob >= 0.6 else "정상 음성"
+                        res_tag = "🚨[보이스피싱]" if is_phishing else "✅[정상]"
+                        
+                        log_txt = f"📊 [{current_idx}/{total_files}] {filename}\n"
+                        log_txt += f"   └ 점수: {final_score:.2f} / 5.00 | AI: {ai_str:>7} | 결과: {res_tag}"
+                        
+                        if has_attitude_shift:
+                            log_txt += f"  {shift_message}\n"
+                        else:
+                            log_txt += "\n"
+                            
+                        self.log_signal.emit(log_txt)
+
+                    except Exception as e: 
+                        self.log_signal.emit(f"❌ [{current_idx}/{total_files}] {filename} 실패: {e}\n")
                     finally:
                         if temp_wav and os.path.exists(temp_wav): os.remove(temp_wav)
                         gc.collect()
 
             voice.release()
-            lines = ["═" * 55, f"📊 배치 시뮬레이션 요약 통계", "═" * 55]
-            for inv, cnt in stats.items():
-                if cnt[0] == 0: continue
-                lines.append(f"  {inv:<12}: 정탐 {cnt[1]}/{cnt[0]} 개 ({cnt[1]/cnt[0]*100:.1f}%)")
-            self.done_signal.emit("\n".join(lines))
+
+            # 최종 통계 요약 리포트 산출 및 동기화
+            summary_lines = []
+            summary_lines.append("═" * 65)
+            summary_lines.append(f"📊 배치 실험 통계 요약 리포트 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
+            summary_lines.append(f"🏷️ 포함된 실제 데이터 그룹: [{self.actual_class}]")
+            summary_lines.append("═" * 65)
+
+            total_all = 0
+            correct_all = 0
+
+            for inv in intervals:
+                count_data = stats.get(inv, {"total": 0, "correct": 0})
+                total = count_data["total"]
+                if total == 0: continue
+                correct = count_data["correct"]
+                rate = (correct / total * 100) if total > 0 else 0.0
+                summary_lines.append(f"  {inv:<12}: 정확한 판정 {correct:<3} / 전체 {total:<3} 개 (정탐률: {rate:>5.1f}%)")
+                total_all += total
+                correct_all += correct
+
+            if total_all > 0:
+                overall_rate = (correct_all / total_all * 100) if total_all > 0 else 0.0
+                summary_lines.append("-" * 65)
+                summary_lines.append(f"  {'TOTAL':<12}: 정확한 판정 {correct_all:<3} / 전체 {total_all:<3} 개 (종합 정탐률: {overall_rate:>5.1f}%)")
+                summary_lines.append("═" * 65)
+                self.done_signal.emit("\n".join(summary_lines))
+            else:
+                self.done_signal.emit("")
+
         except Exception as e: self.log_signal.emit(f"오류: {e}")
         finally: sys.stdout = self._old_stdout
 
@@ -948,13 +1054,37 @@ class BatchTab(QWidget):
 
         class_row = QHBoxLayout()
         lbl = QLabel("폴더 데이터 실제 구분 라벨 선택: ")
-        self._class_fishing = make_btn("보이스피싱", "#da3633", "#f85149")
+        
+        # 버튼 토글 디자인
+        toggle_style = """
+            QPushButton {
+                background-color: #21262d; color: #8b949e;
+                border: 1px solid #30363d; border-radius: 6px;
+                padding: 8px 18px; font-weight: 600;
+            }
+            QPushButton:hover { background-color: #30363d; }
+            QPushButton:checked { background-color: %s; color: #ffffff; border: none; }
+            QPushButton:checked:hover { background-color: %s; }
+        """
+        
+        self._class_fishing = make_btn("보이스피싱")
         self._class_fishing.setCheckable(True)
+        self._class_fishing.setStyleSheet(toggle_style % ("#da3633", "#f85149"))
         self._class_fishing.setChecked(True)
-        self._class_normal  = make_btn("정상대화",   "#2ea043", "#3fb950")
+        
+        self._class_normal  = make_btn("정상대화")
         self._class_normal.setCheckable(True)
-        self._class_fishing.clicked.connect(lambda: self._class_normal.setChecked(False))
-        self._class_normal.clicked.connect(lambda: self._class_fishing.setChecked(False))
+        self._class_normal.setStyleSheet(toggle_style % ("#2ea043", "#3fb950"))
+        
+        self._class_fishing.clicked.connect(lambda: (
+            self._class_normal.setChecked(False), 
+            self._class_fishing.setChecked(True)
+        ))
+        self._class_normal.clicked.connect(lambda: (
+            self._class_fishing.setChecked(False), 
+            self._class_normal.setChecked(True)
+        ))
+        
         class_row.addWidget(lbl)
         class_row.addWidget(self._class_fishing)
         class_row.addWidget(self._class_normal)
@@ -962,14 +1092,25 @@ class BatchTab(QWidget):
         layout.addLayout(class_row)
 
         ctrl_row = QHBoxLayout()
-        self._btn_run = make_btn("▶  배치 파일 실험 실행", "#1f6feb")
+        self._btn_run = make_btn("▶  배치 실험 실행", "#1f6feb")
         self._btn_run.clicked.connect(self._run)
         self._btn_run.setEnabled(False)
+
+        self._btn_stop = make_btn("⏹  실험 중단", "#da3633", "#f85149")
+        self._btn_stop.clicked.connect(self._stop)
+        self._btn_stop.setEnabled(False)
+
+        self._btn_clear = make_btn("🗑  로그 지우기", "#21262d", "#30363d")
+        self._btn_clear.clicked.connect(lambda: self._log.clear())
+
         ctrl_row.addWidget(self._btn_run)
+        ctrl_row.addWidget(self._btn_stop)
+        ctrl_row.addWidget(self._btn_clear)
         ctrl_row.addStretch()
         layout.addLayout(ctrl_row)
 
         self._progress = QProgressBar()
+        self._progress.setStyleSheet("QProgressBar { background:#21262d; border:none; border-radius:4px; height:6px; } QProgressBar::chunk { background:#1f6feb; border-radius:4px; }")
         layout.addWidget(self._progress)
 
         self._log = make_text_box()
@@ -986,13 +1127,33 @@ class BatchTab(QWidget):
         if not self._folder_path: return
         self._log.clear()
         self._btn_run.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+        self._progress.setValue(0)
+        
         lbl = "보이스피싱" if self._class_fishing.isChecked() else "정상대화"
         self._worker = BatchWorker(self._folder_path, lbl)
         self._worker.log_signal.connect(lambda t: append_colored(self._log, t))
         self._worker.progress_signal.connect(lambda c, t: (self._progress.setMaximum(t), self._progress.setValue(c)))
-        self._worker.done_signal.connect(lambda s: append_colored(self._log, f"\n\n{s}\n"))
-        self._worker.finished.connect(lambda: self._btn_run.setEnabled(True))
+        self._worker.done_signal.connect(self._on_done)
+        self._worker.finished.connect(self._on_finished)
         self._worker.start()
+
+    def _stop(self):
+        if self._worker:
+            self._worker.stop()
+        self._btn_stop.setEnabled(False)
+        append_colored(self._log, "\n⏳ 배치 실험 중단 요청됨... (현재 분석 중인 오디오 파일까지만 완료 후 정지합니다)\n")
+
+    def _on_done(self, report_str: str):
+        if report_str:
+            append_colored(self._log, f"\n\n{report_str}\n")
+            ask_save_report(self, report_str, "Batch")
+        else:
+            append_colored(self._log, "\n✅ 새로 분석된 파일이 없어 리포트를 생성하지 않습니다.\n")
+
+    def _on_finished(self):
+        self._btn_run.setEnabled(True)
+        self._btn_stop.setEnabled(False)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

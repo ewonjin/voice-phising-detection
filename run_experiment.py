@@ -40,11 +40,11 @@ def get_arousal_label(value):
 def main():
     # ── 1. [사용자 설정 항목] ──────────────────────────────────────────────
     # TARGET_DIR   = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/음성 분리"
-    TARGET_DIR   = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/fishingmp3"
-    ACTUAL_CLASS = "보이스피싱"                                         # 👈 폴더 안 파일들의 실제 정답 ("보이스피싱" 또는 "정상대화")
+    # TARGET_DIR   = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/fishingmp3"
+    # ACTUAL_CLASS = "보이스피싱"                                         # 👈 폴더 안 파일들의 실제 정답 ("보이스피싱" 또는 "정상대화")
     
     # TARGET_DIR = "/Users/ewonjin/Downloads/call"
-    TARGET_DIR = "/Users/ewonjin/Downloads/정상"
+    TARGET_DIR = "/Users/ewonjin/Downloads/통녹"
     ACTUAL_CLASS = "정상대화" 
     # TARGET_DIR = "/Users/ewonjin/Downloads/임시"
     # ───────────────────────────────────────────────────────────────────

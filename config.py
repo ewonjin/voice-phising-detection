@@ -11,12 +11,13 @@
 # AUDIO_PATH = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/음성 분리/6번_3차례 신고된 남성 전화금융사기범 (음성_6)-2.m4a"
 AUDIO_PATH = "/Users/ewonjin/Downloads/New Projectver2.wav"
 
+MODEL_PATH         = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/파이썬 파일/phishing_kluebert_binary_v1(2.1원본)"
 # MODEL_PATH         = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/파이썬 파일/phishing_kluebert_binary_v2_1"
 # MODEL_PATH         = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/파이썬 파일/phishing_kluebert_binary_v3(합성2500)"
 # MODEL_PATH         = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/파이썬 파일/phishing_kluebert_binary_v4(합성400)"
 # MODEL_PATH         = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/파이썬 파일/phishing_kluebert_binary_v5(합성100)"
 # MODEL_PATH         = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/파이썬 파일/phishing_kluebert_binary_v6(각300)"
-MODEL_PATH         = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/파이썬 파일/phishing_kluebert_binary_v7(600,800)"
+# MODEL_PATH         = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/파이썬 파일/phishing_kluebert_binary_v7(600,800)"
 
 EMOTION_MODEL_PATH = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/파이썬 파일/가중치/DenseNet121_Data Augmentation.pth"
 AI_DETECTOR_PATH   = "/Users/ewonjin/Desktop/4-1/캡스톤디자인2/파이썬 파일/가중치/AI_Voice_Detector_Korean_v3.pth"
